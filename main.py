@@ -6,6 +6,14 @@ import time
 from futu_utils import fetch_history_kline, print_kline_stats, get_account_list, get_option_chain, monitor_option_chain
 import argparse
 from futu import OptionType
+import socket
+
+def check_opend_connection():
+    """检查OpenD服务是否可连接"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex(('127.0.0.1', 11111))
+    sock.close()
+    return result == 0
 
 def get_change_percentage(kline_data):
     """计算涨跌幅"""
@@ -29,6 +37,21 @@ def get_account_list(trade_ctx):
         print(f"获取账户列表失败: {data}")
 
 def main():
+    # 检查OpenD服务是否可连接
+    if not check_opend_connection():
+        print("错误: 无法连接到富途OpenD服务（127.0.0.1:11111）")
+        print("请确保：")
+        print("1. 已安装富途牛牛客户端")
+        print("2. 已登录富途牛牛客户端")
+        print("3. OpenD服务已启动")
+        return
+
+    # 创建交易上下文
+    trade_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.HK, host='127.0.0.1', port=11111)
+    if not trade_ctx:
+        print("错误: 无法创建交易上下文")
+        return
+
     parser = argparse.ArgumentParser(description='富途API工具')
     parser.add_argument('--mode', type=str, required=True, choices=['kline', 'account', 'option', 'monitor'],
                       help='运行模式: kline(获取K线数据), account(获取账户信息), option(获取期权链), monitor(监控期权链)')
@@ -59,7 +82,7 @@ def main():
             print_kline_stats(data, args.code, start_time.strftime('%Y-%m-%d'), end_time.strftime('%Y-%m-%d'))
     
     elif args.mode == 'account':
-        get_account_list()
+        get_account_list(trade_ctx)
     
     elif args.mode == 'option':
         if not args.code:
@@ -72,6 +95,9 @@ def main():
             print("错误: 监控期权链需要指定股票代码")
             return
         monitor_option_chain(args.code, args.interval, option_type)
+
+    # 关闭交易上下文
+    trade_ctx.close()
 
 if __name__ == '__main__':
     main()
