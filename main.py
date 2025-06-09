@@ -36,6 +36,94 @@ def get_account_list(trade_ctx):
     else:
         print(f"获取账户列表失败: {data}")
 
+def subscribe_option_quotes(quote_ctx, option_codes):
+    """订阅期权实时行情"""
+    ret, data = quote_ctx.subscribe(option_codes, [SubType.QUOTE, SubType.TICKER, SubType.ORDER_BOOK])
+    if ret == RET_OK:
+        print(f"成功订阅期权行情: {option_codes}")
+    else:
+        print(f"订阅期权行情失败: {data}")
+
+class QuoteHandler(StockQuoteHandlerBase):
+    def on_recv_rsp(self, rsp_pb):
+        ret_code, data = super().on_recv_rsp(rsp_pb)
+        if ret_code == RET_OK:
+            print("\n期权行情更新:")
+            print("=" * 80)
+            print(data)
+            print("=" * 80)
+        return ret_code, data
+
+class OrderBookHandler(OrderBookHandlerBase):
+    def on_recv_rsp(self, rsp_pb):
+        ret_code, data = super().on_recv_rsp(rsp_pb)
+        if ret_code == RET_OK:
+            print("\n期权盘口更新:")
+            print("=" * 80)
+            print(data)
+            print("=" * 80)
+        return ret_code, data
+
+class TickerHandler(TickerHandlerBase):
+    def on_recv_rsp(self, rsp_pb):
+        ret_code, data = super().on_recv_rsp(rsp_pb)
+        if ret_code == RET_OK:
+            print("\n期权逐笔成交更新:")
+            print("=" * 80)
+            print(data)
+            print("=" * 80)
+        return ret_code, data
+
+def monitor_option_chain(code, interval, option_type):
+    """监控期权链实时数据"""
+    # 创建行情上下文
+    quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+    
+    try:
+        # 获取期权链
+        ret, data = quote_ctx.get_option_chain(code, option_type=option_type)
+        if ret != RET_OK:
+            print(f"获取期权链失败: {data}")
+            return
+            
+        # 提取期权代码
+        option_codes = []
+        if isinstance(data, pd.DataFrame):
+            # 打印数据结构以便调试
+            print("\n期权链数据结构:")
+            print(data.columns)
+            print("\n数据示例:")
+            print(data.head())
+            
+            # 只选择前10个期权代码（避免超出订阅限制）
+            codes = data['code'].dropna().tolist()[:10]
+            option_codes.extend(codes)
+        
+        if not option_codes:
+            print("未找到可用的期权代码")
+            return
+            
+        print(f"\n选择监控以下 {len(option_codes)} 个期权代码:")
+        for code in option_codes:
+            print(f"- {code}")
+            
+        # 订阅期权行情
+        subscribe_option_quotes(quote_ctx, option_codes)
+        
+        # 设置回调处理器
+        quote_ctx.set_handler(QuoteHandler())
+        quote_ctx.set_handler(OrderBookHandler())
+        quote_ctx.set_handler(TickerHandler())
+        
+        print(f"\n开始监控期权行情，按Ctrl+C退出...")
+        while True:
+            time.sleep(1)  # 保持主线程运行，等待回调
+            
+    except KeyboardInterrupt:
+        print("\n停止监控")
+    finally:
+        quote_ctx.close()
+
 def main():
     # 检查OpenD服务是否可连接
     if not check_opend_connection():
