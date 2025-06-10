@@ -7,6 +7,35 @@ from futu_utils import fetch_history_kline, print_kline_stats, get_account_list,
 import argparse
 from futu import OptionType
 import socket
+import logging
+import os
+
+def setup_logger():
+    """设置日志记录器"""
+    # 创建logs目录
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # 获取当前小时作为日志文件名
+    current_hour = datetime.now().strftime('%Y%m%d_%H')
+    log_file = f'logs/option_data_{current_hour}.log'
+    
+    # 配置日志记录器
+    logger = logging.getLogger('option_monitor')
+    logger.setLevel(logging.INFO)
+    
+    # 创建文件处理器
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    # 设置日志格式
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # 添加处理器到记录器
+    logger.addHandler(file_handler)
+    
+    return logger
 
 def check_opend_connection():
     """检查OpenD服务是否可连接"""
@@ -45,37 +74,44 @@ def subscribe_option_quotes(quote_ctx, option_codes):
         print(f"订阅期权行情失败: {data}")
 
 class QuoteHandler(StockQuoteHandlerBase):
+    def __init__(self, logger):
+        super().__init__()
+        self.logger = logger
+        
     def on_recv_rsp(self, rsp_pb):
         ret_code, data = super().on_recv_rsp(rsp_pb)
         if ret_code == RET_OK:
-            print("\n期权行情更新:")
-            print("=" * 80)
-            print(data)
-            print("=" * 80)
+            self.logger.info(f"期权行情更新: {data}")
         return ret_code, data
 
 class OrderBookHandler(OrderBookHandlerBase):
+    def __init__(self, logger):
+        super().__init__()
+        self.logger = logger
+        
     def on_recv_rsp(self, rsp_pb):
         ret_code, data = super().on_recv_rsp(rsp_pb)
         if ret_code == RET_OK:
-            print("\n期权盘口更新:")
-            print("=" * 80)
-            print(data)
-            print("=" * 80)
+            self.logger.info(f"期权盘口更新: {data}")
         return ret_code, data
 
 class TickerHandler(TickerHandlerBase):
+    def __init__(self, logger):
+        super().__init__()
+        self.logger = logger
+        
     def on_recv_rsp(self, rsp_pb):
         ret_code, data = super().on_recv_rsp(rsp_pb)
         if ret_code == RET_OK:
-            print("\n期权逐笔成交更新:")
-            print("=" * 80)
-            print(data)
-            print("=" * 80)
+            self.logger.info(f"期权逐笔成交更新: {data}")
         return ret_code, data
 
 def monitor_option_chain(code, interval, option_type):
     """监控期权链实时数据"""
+    # 设置日志记录器
+    logger = setup_logger()
+    logger.info(f"开始监控期权 {code}")
+    
     # 创建行情上下文
     quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
     
@@ -83,44 +119,40 @@ def monitor_option_chain(code, interval, option_type):
         # 获取期权链
         ret, data = quote_ctx.get_option_chain(code, option_type=option_type)
         if ret != RET_OK:
-            print(f"获取期权链失败: {data}")
+            logger.error(f"获取期权链失败: {data}")
             return
             
         # 提取期权代码
         option_codes = []
         if isinstance(data, pd.DataFrame):
-            # 打印数据结构以便调试
-            print("\n期权链数据结构:")
-            print(data.columns)
-            print("\n数据示例:")
-            print(data.head())
+            # 记录数据结构
+            logger.info(f"期权链数据结构: {data.columns.tolist()}")
+            logger.info(f"数据示例: {data.head().to_dict()}")
             
             # 只选择前10个期权代码（避免超出订阅限制）
             codes = data['code'].dropna().tolist()[:10]
             option_codes.extend(codes)
         
         if not option_codes:
-            print("未找到可用的期权代码")
+            logger.error("未找到可用的期权代码")
             return
             
-        print(f"\n选择监控以下 {len(option_codes)} 个期权代码:")
-        for code in option_codes:
-            print(f"- {code}")
+        logger.info(f"选择监控以下 {len(option_codes)} 个期权代码: {option_codes}")
             
         # 订阅期权行情
         subscribe_option_quotes(quote_ctx, option_codes)
         
         # 设置回调处理器
-        quote_ctx.set_handler(QuoteHandler())
-        quote_ctx.set_handler(OrderBookHandler())
-        quote_ctx.set_handler(TickerHandler())
+        quote_ctx.set_handler(QuoteHandler(logger))
+        quote_ctx.set_handler(OrderBookHandler(logger))
+        quote_ctx.set_handler(TickerHandler(logger))
         
-        print(f"\n开始监控期权行情，按Ctrl+C退出...")
+        logger.info("开始监控期权行情...")
         while True:
             time.sleep(1)  # 保持主线程运行，等待回调
             
     except KeyboardInterrupt:
-        print("\n停止监控")
+        logger.info("停止监控")
     finally:
         quote_ctx.close()
 
