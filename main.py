@@ -24,28 +24,63 @@ quote_queue = deque(maxlen=MAX_QUEUE_SIZE)
 ticker_queue = deque(maxlen=MAX_QUEUE_SIZE)
 
 def setup_logger():
+    """设置日志"""
     global logger
     if logger is not None:
         return logger
-    logger = logging.getLogger('Trade')
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fh = logging.FileHandler(f'trade_{datetime.now().strftime("%Y%m%d")}.log', encoding='utf-8')
-        fh.setLevel(logging.INFO)
+        
+    try:
+        # 创建日志目录
+        log_dir = 'logs'
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # 设置日志文件名
+        log_file = os.path.join(log_dir, f'trade_{datetime.now().strftime("%Y%m%d")}.log')
+        
+        # 创建logger
+        logger = logging.getLogger('Trade')
+        logger.setLevel(logging.INFO)
+        
+        # 清除已有的handlers
+        if logger.handlers:
+            logger.handlers.clear()
+            
+        # 文件处理器
+        try:
+            fh = logging.FileHandler(log_file, encoding='utf-8', mode='a')
+            fh.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
+            fh.setFormatter(file_formatter)
+            logger.addHandler(fh)
+            print(f"日志文件创建成功: {log_file}")
+        except Exception as e:
+            print(f"创建日志文件失败: {str(e)}")
+            
+        # 控制台处理器
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        logger.addHandler(fh)
+        console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
+        ch.setFormatter(console_formatter)
         logger.addHandler(ch)
-    return loggerHandler(ch)
-    return logger
+        
+        # 测试日志
+        logger.info("日志系统初始化成功")
+        print("日志系统初始化完成")
+        
+        return logger
+        
+    except Exception as e:
+        print(f"设置日志系统时发生错误: {str(e)}")
+        raise
 
 def get_history_kline(quote_ctx, code, start_date, end_date, ktype):
     """获取历史K线数据"""
     try:
-        ret, data, *_ = quote_ctx.request_history_kline(code, start=start_date, end=end_date, ktype=ktype)
+        # 将日期转换为字符串格式
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        ret, data, *_ = quote_ctx.request_history_kline(code, start=start_str, end=end_str, ktype=ktype)
         if ret != RET_OK:
             logger.error("获取历史K线失败: %s", data)
             return None
@@ -286,7 +321,7 @@ def monitor_profit_loss(trade_ctx, option_code, buy_price, qty):
     """监控期权盈亏"""
     if buy_price is None:
         return
-    
+
     while True:
         try:
             # 获取当前价格
@@ -409,10 +444,10 @@ def trend_reversal_strategy(quote_ctx, trade_ctx, stock_code):
         if option_code is None:
             logger.warning("[流程图策略] 获取期权链失败: %s", stock_code)
             return
-            
+    
         # 买入期权
         success, buy_price = buy_option(trade_ctx, option_code, qty)
-        
+    
         if not success:
             logger.error("[流程图策略] 买入期权失败: %s", option_code)
             return
@@ -525,6 +560,14 @@ def main():
     trade_ctx = OpenSecTradeContext(host='127.0.0.1', port=11111)
     
     try:
+        # 订阅基本行情数据
+        stock_list = ['HK.00700']
+        ret, data = quote_ctx.subscribe(stock_list, [SubType.QUOTE])
+        if ret != RET_OK:
+            logger.error("订阅行情失败: %s", data)
+            return
+        logger.info("成功订阅基本行情数据")
+        
         while True:
             logger.info("\n" + "="*50)
             logger.info("开始新一轮分析 - %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -548,7 +591,6 @@ def main():
                 logger.warning("当前持仓为空")
             
             # 分析股票
-            stock_list = ['HK.00700', 'HK.09988', 'HK.03690']  # 腾讯、阿里巴巴、美团
             for stock_code in stock_list:
                 if stock_code == 'HK.00700':
                     monitor_option_chain(quote_ctx, stock_code, OptionType.CALL)
