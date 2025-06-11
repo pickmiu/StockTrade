@@ -2,6 +2,10 @@ from futu import *
 import pandas as pd
 from datetime import datetime, timedelta
 import time
+import logging
+
+# 配置日志
+logger = logging.getLogger('FutuAPI')
 
 def get_change_percentage(kline_data):
     """计算涨跌幅"""
@@ -11,143 +15,236 @@ def get_volume_change(kline_data):
     """计算成交量变化"""
     return ((kline_data['volume'] - kline_data['volume'].shift(1)) / kline_data['volume'].shift(1) * 100).round(2)
 
-def fetch_history_kline(stock_code, days=5):
-    quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-    try:
-        end_time = datetime.now()
-        start_time = end_time - timedelta(days=days)
-        end_time_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
-        start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-        ret, data, page_req_key = quote_ctx.request_history_kline(stock_code, 
-            start=start_time_str,
-            end=end_time_str, 
-            ktype=KLType.K_DAY,
-            max_count=100,
-            fields=[KL_FIELD.ALL],
-            extended_time=False)
-        if ret == RET_OK and len(data) > 0:
-            data['change_percentage'] = get_change_percentage(data)
-            data['volume_change'] = get_volume_change(data)
-            return data
-        else:
+
+
+class FutuAPI:
+    def __init__(self, host='127.0.0.1', port=11111):
+        self.logger = logging.getLogger('Trade')
+        self.logger.setLevel(logging.INFO)
+        self.logger.info(f"初始化 FutuAPI，连接 {host}:{port}")
+        self.quote_ctx = OpenQuoteContext(host=host, port=port)
+        self.trade_ctx = OpenSecTradeContext(host=host, port=port, security_firm=SecurityFirm.FUTUSECURITIES)
+        self.subscribed_stocks = set()
+        
+    def __del__(self):
+        self.logger.info("关闭 FutuAPI 连接")
+        if hasattr(self, 'quote_ctx'):
+            self.quote_ctx.close()
+        if hasattr(self, 'trade_ctx'):
+            self.trade_ctx.close()
+            
+    def subscribe_stock(self, stock_code):
+        """订阅股票行情"""
+        try:
+            if stock_code not in self.subscribed_stocks:
+                self.logger.info(f"尝试订阅股票: {stock_code}")
+                result = self.quote_ctx.subscribe([stock_code], [SubType.QUOTE, SubType.TICKER, SubType.K_1M])
+                self.logger.info(f"订阅结果: {result}")
+                
+                if not isinstance(result, tuple) or len(result) != 2:
+                    self.logger.error(f"订阅返回格式错误: {result}")
+                    return False
+                    
+                ret, data = result
+                if ret == RET_OK:
+                    self.subscribed_stocks.add(stock_code)
+                    self.logger.info(f"成功订阅股票: {stock_code}")
+                else:
+                    self.logger.error(f"订阅股票失败: {stock_code}, 错误: {data}")
+                return ret == RET_OK
+            return True
+        except Exception as e:
+            self.logger.error(f"订阅股票时发生异常: {str(e)}", exc_info=True)
+            return False
+
+    def get_stock_quote(self, stock_code):
+        """获取股票实时行情"""
+        try:
+            if not self.subscribe_stock(stock_code):
+                return None
+                
+            self.logger.info(f"获取股票行情: {stock_code}")
+            result = self.quote_ctx.get_stock_quote([stock_code])
+            self.logger.info(f"获取行情结果: {result}")
+            
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取行情返回格式错误: {result}")
+                return None
+                
+            ret, data = result
+            if ret == RET_OK:
+                return data
+            else:
+                self.logger.error(f"获取股票行情失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取股票行情时发生异常: {str(e)}", exc_info=True)
             return None
-    finally:
-        quote_ctx.close()
 
-def print_kline_stats(data, stock_code, start_time_str, end_time_str):
-    print(f"\n{stock_code} {start_time_str} 至 {end_time_str} 股价变动：")
-    print("=" * 80)
-    for _, row in data.iterrows():
-        date_str = row['time_key'].split()[0]
-        print(f"日期: {date_str}")
-        print(f"开盘价: {row['open']:.2f}")
-        print(f"最高价: {row['high']:.2f}")
-        print(f"最低价: {row['low']:.2f}")
-        print(f"收盘价: {row['close']:.2f}")
-        print(f"涨跌幅: {row['change_percentage']:+.2f}%")
-        print(f"成交量: {row['volume']:,.0f}")
-        print(f"成交额: {row['turnover']:,.2f}")
-        if not pd.isna(row['volume_change']):
-            print(f"成交量变化: {row['volume_change']:+.2f}%")
-        print("-" * 40)
-    print("\n统计信息：")
-    print("=" * 40)
-    print(f"平均成交量: {data['volume'].mean():,.0f}")
-    print(f"最大成交量: {data['volume'].max():,.0f}")
-    print(f"最小成交量: {data['volume'].min():,.0f}")
-    print(f"平均成交额: {data['turnover'].mean():,.2f}")
-    print(f"最高价: {data['high'].max():.2f}")
-    print(f"最低价: {data['low'].min():.2f}")
-    print(f"平均涨跌幅: {data['change_percentage'].mean():+.2f}%")
-
-def get_account_list():
-    trade_ctx = OpenSecTradeContext(host='127.0.0.1', port=11111)
-    try:
-        ret, data = trade_ctx.get_acc_list()
-        if ret == RET_OK:
-            print("\n账户列表：")
-            print("=" * 80)
-            for _, row in data.iterrows():
-                for col in data.columns:
-                    print(f"{col}: {row[col]}")
-                print("-" * 40)
-        else:
-            print(f"获取账户列表失败: {data}")
-    finally:
-        trade_ctx.close()
-
-def get_option_chain(stock_code, option_type=OptionType.CALL, cond_type=OptionCondType.ALL, strike_price=None):
-    """
-    获取期权链数据
-    :param stock_code: 股票代码，如 'HK.09988'
-    :param option_type: 期权类型，可选值：
-        - OptionType.CALL: 看涨期权
-        - OptionType.PUT: 看跌期权
-        - OptionType.ALL: 所有期权
-    :param cond_type: 期权条件类型，可选值：
-        - OptionCondType.WITHIN: 在指定行权价范围内
-        - OptionCondType.OUTSIDE: 在指定行权价范围外
-        - OptionCondType.ALL: 所有行权价
-    :param strike_price: 行权价，当 cond_type 为 WITHIN 或 OUTSIDE 时需要指定
-    :return: 期权链数据
-    """
-    quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-    try:
-        print(f"\n正在获取 {stock_code} 的期权链数据...")
-        print(f"期权类型: {option_type}")
-        print(f"条件类型: {cond_type}")
-        if strike_price:
-            print(f"行权价: {strike_price}")
-        # 显式传递index_option_type参数，避免类型错误
-        ret, data = quote_ctx.get_option_chain(stock_code, index_option_type=IndexOptionType.NORMAL, option_type=option_type, option_cond_type=cond_type)
-        if ret == RET_OK:
-            print(f"\n{stock_code} 期权链数据：")
-            print("=" * 80)
-            print("字段名:", list(data.columns))
-            for _, row in data.iterrows():
-                print(f"期权代码: {row['code']}")
-                print(f"期权名称: {row['name']}")
-                print(f"期权类型: {row['option_type']}")
-                print(f"行权价: {row['strike_price']}")
-                # 安全打印可选字段
-                if 'expiry_date' in data.columns:
-                    print(f"到期日: {row['expiry_date']}")
-                if 'last_price' in data.columns:
-                    print(f"最新价: {row['last_price']}")
-                if 'volume' in data.columns:
-                    print(f"成交量: {row['volume']}")
-                if 'open_interest' in data.columns:
-                    print(f"持仓量: {row['open_interest']}")
-                print("-" * 40)
-            return data
-        else:
-            print(f"获取期权链数据失败: {data}")
+    def get_market_snapshot(self, stock_list):
+        """获取市场快照"""
+        try:
+            self.logger.info(f"获取市场快照: {stock_list}")
+            # 确保所有股票都已订阅
+            for stock in stock_list:
+                self.subscribe_stock(stock)
+                
+            result = self.quote_ctx.get_market_snapshot(stock_list)
+            self.logger.info(f"获取市场快照结果: {result}")
+            
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取市场快照返回格式错误: {result}")
+                return None
+                
+            ret, data = result
+            if ret == RET_OK:
+                return data
+            else:
+                self.logger.error(f"获取市场快照失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取市场快照时发生异常: {str(e)}", exc_info=True)
             return None
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
-        return None
-    finally:
-        quote_ctx.close()
 
-def monitor_option_chain(stock_code, interval=5, option_type=OptionType.ALL):
-    """
-    持续监控期权链数据
-    :param stock_code: 股票代码，如 'HK.09988'
-    :param interval: 刷新间隔（秒）
-    :param option_type: 期权类型，可选值：
-        - OptionType.CALL: 看涨期权
-        - OptionType.PUT: 看跌期权
-        - OptionType.ALL: 所有期权
-    """
-    print(f"开始监控 {stock_code} 的期权链数据，刷新间隔 {interval} 秒...")
-    print(f"期权类型: {option_type}")
-    try:
-        while True:
-            data = get_option_chain(stock_code, option_type)
-            if data is not None:
-                print(f"\n更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\n停止监控")
-    except Exception as e:
-        print(f"监控过程中发生错误: {str(e)}") 
+    def get_history_kline(self, stock_code, start_date, end_date, ktype=KLType.K_DAY, autype=AuType.QFQ):
+        """获取历史K线数据"""
+        try:
+            self.logger.info(f"获取历史K线: {stock_code}, {start_date} 到 {end_date}")
+            result = self.quote_ctx.request_history_kline(
+                code=stock_code,
+                start=start_date,
+                end=end_date,
+                ktype=ktype,
+                autype=autype,
+                max_count=1000
+            )
+            if not isinstance(result, tuple) or len(result) < 2:
+                self.logger.error(f"获取历史K线返回格式错误: {result}")
+                return None
+            ret, data = result[:2]
+            if ret == RET_OK:
+                if data is not None and not data.empty:
+                    return data
+                else:
+                    self.logger.warning(f"获取历史K线无数据: {stock_code}, {start_date} 到 {end_date}")
+                    return None
+            else:
+                self.logger.error(f"获取历史K线失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取历史K线时发生异常: {str(e)}", exc_info=True)
+            return None
+
+    def get_account_funds(self):
+        """获取账户资金"""
+        try:
+            self.logger.info("获取账户列表")
+            result = self.trade_ctx.get_acc_list()
+            self.logger.info(f"获取账户列表结果: {result}")
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取账户列表返回格式错误: {result}")
+                return None
+            ret, data = result
+            if ret != RET_OK:
+                self.logger.error(f"获取账户列表失败: {data}")
+                return None
+            if len(data) == 0:
+                self.logger.error("未找到交易账户")
+                return None
+            acc_id = data['acc_id'][0]
+            self.logger.info(f"获取账户资金: acc_id={acc_id}")
+            # 修正资金查询方法
+            result = self.trade_ctx.accinfo_query(trd_env=TrdEnv.SIMULATE, acc_id=acc_id)
+            self.logger.info(f"获取账户资金结果: {result}")
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取账户资金返回格式错误: {result}")
+                return None
+            ret, data = result
+            if ret == RET_OK:
+                return data
+            else:
+                self.logger.error(f"获取账户资金失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取账户资金时发生异常: {str(e)}", exc_info=True)
+            return None
+
+    def get_positions(self):
+        """获取持仓信息"""
+        try:
+            self.logger.info("获取账户列表")
+            result = self.trade_ctx.get_acc_list()
+            self.logger.info(f"获取账户列表结果: {result}")
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取账户列表返回格式错误: {result}")
+                return None
+            ret, data = result
+            if ret != RET_OK:
+                self.logger.error(f"获取账户列表失败: {data}")
+                return None
+            if len(data) == 0:
+                self.logger.error("未找到交易账户")
+                return None
+            acc_id = data['acc_id'][0]
+            self.logger.info(f"获取持仓信息: acc_id={acc_id}")
+            # 只用 position_list_query
+            result = self.trade_ctx.position_list_query(trd_env=TrdEnv.SIMULATE, acc_id=acc_id)
+            self.logger.info(f"获取持仓信息结果: {result}")
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取持仓信息返回格式错误: {result}")
+                return None
+            ret, data = result
+            if ret == RET_OK and data is not None and not data.empty:
+                return data
+            else:
+                self.logger.error(f"获取持仓信息失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取持仓信息时发生异常: {str(e)}", exc_info=True)
+            return None
+
+    def place_order(self, stock_code, price, qty, trd_side=TrdSide.BUY, order_type=OrderType.NORMAL):
+        """下单"""
+        try:
+            self.logger.info("获取账户列表")
+            result = self.trade_ctx.get_acc_list()
+            self.logger.info(f"获取账户列表结果: {result}")
+            
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"获取账户列表返回格式错误: {result}")
+                return None
+                
+            ret, data = result
+            if ret != RET_OK:
+                self.logger.error(f"获取账户列表失败: {data}")
+                return None
+                
+            if len(data) == 0:
+                self.logger.error("未找到交易账户")
+                return None
+                
+            acc_id = data['acc_id'][0]
+            self.logger.info(f"下单: stock_code={stock_code}, price={price}, qty={qty}, acc_id={acc_id}")
+            result = self.trade_ctx.place_order(
+                price=price,
+                qty=qty,
+                code=stock_code,
+                trd_side=trd_side,
+                order_type=order_type,
+                acc_id=acc_id
+            )
+            self.logger.info(f"下单结果: {result}")
+            
+            if not isinstance(result, tuple) or len(result) != 2:
+                self.logger.error(f"下单返回格式错误: {result}")
+                return None
+                
+            ret, data = result
+            if ret == RET_OK:
+                return data
+            else:
+                self.logger.error(f"下单失败: {data}")
+                return None
+        except Exception as e:
+            self.logger.error(f"下单时发生异常: {str(e)}", exc_info=True)
+            return None 
