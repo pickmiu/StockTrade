@@ -3,7 +3,6 @@ from futu import *
 import pandas as pd
 from datetime import datetime, timedelta
 import time
-from futu_utils import FutuAPI
 import argparse
 from futu import OptionType
 import socket
@@ -25,7 +24,9 @@ quote_queue = deque(maxlen=MAX_QUEUE_SIZE)
 ticker_queue = deque(maxlen=MAX_QUEUE_SIZE)
 
 def setup_logger():
-    """配置并返回一个 logger 对象"""
+    global logger
+    if logger is not None:
+        return logger
     logger = logging.getLogger('Trade')
     logger.setLevel(logging.INFO)
     if not logger.handlers:
@@ -38,7 +39,70 @@ def setup_logger():
         ch.setFormatter(formatter)
         logger.addHandler(fh)
         logger.addHandler(ch)
+    return loggerHandler(ch)
     return logger
+
+def get_history_kline(quote_ctx, code, start_date, end_date, ktype):
+    """获取历史K线数据"""
+    try:
+        ret, data, *_ = quote_ctx.request_history_kline(code, start=start_date, end=end_date, ktype=ktype)
+        if ret != RET_OK:
+            logger.error("获取历史K线失败: %s", data)
+            return None
+        return data
+    except Exception as e:
+        logger.error("获取历史K线时发生错误: %s", str(e))
+        return None
+
+def get_stock_quote(quote_ctx, code):
+    """获取股票实时行情"""
+    try:
+        ret, data, *_ = quote_ctx.get_stock_quote([code])
+        if ret != RET_OK:
+            logger.error("获取股票行情失败: %s", data)
+            return None
+        return data
+    except Exception as e:
+        logger.error("获取股票行情时发生错误: %s", str(e))
+        return None
+
+def get_account_funds(trade_ctx):
+    """获取账户资金状况"""
+    try:
+        ret, data = trade_ctx.accinfo_query(trd_env=TrdEnv.SIMULATE)
+        if ret != RET_OK:
+            logger.error("获取账户资金状况失败: %s", data)
+            return pd.DataFrame()
+        return data
+    except Exception as e:
+        logger.error("获取账户资金状况时发生错误: %s", str(e))
+        return pd.DataFrame()
+
+def get_positions(trade_ctx):
+    """获取持仓信息"""
+    try:
+        ret, data = trade_ctx.position_list_query(trd_env=TrdEnv.SIMULATE)
+        if ret != RET_OK:
+            logger.error("获取持仓信息失败: %s", data)
+            return pd.DataFrame()
+        return data
+    except Exception as e:
+        logger.error("获取持仓信息时发生错误: %s", str(e))
+        return pd.DataFrame()
+
+def place_order(trade_ctx, code, price, qty, trd_side, order_type):
+    """下单"""
+    try:
+        ret, data, *_ = trade_ctx.place_order(price=price, qty=qty, code=code, 
+                                             trd_side=trd_side, order_type=order_type,
+                                             adjust_limit=0, trd_env=TrdEnv.SIMULATE)
+        if ret != RET_OK:
+            logger.error("下单失败: %s", data)
+            return None
+        return data
+    except Exception as e:
+        logger.error("下单时发生错误: %s", str(e))
+        return None
 
 def subscribe_option_quotes(quote_ctx, option_codes):
     """订阅期权实时行情"""
@@ -153,55 +217,23 @@ def is_reversal(kline_1m, kline_10m):
             last_1m['close'] > last_10m['close'] and 
             last_1m['volume'] > avg_volume_10m * 2 and last_1m['volume'] > kline_1m['volume'].iloc[-2] * 2)
 
-def monitor_option_chain(code, option_type):
-    """监控期权链实时数据"""
-    # 设置日志记录器
-    logger = setup_logger()
+def monitor_option_chain(quote_ctx, code, option_type):
     logger.info("开始监控期权 %s", code)
-    
-    # 创建行情上下文
-    quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-    
-    try:
-        # 获取期权链
-        ret, data, *_ = quote_ctx.get_option_chain(code, option_type=option_type)
-        if ret != RET_OK:
-            logger.error("获取期权链失败: %s", data)
-            return
-            
-        # 提取期权代码
-        option_codes = []
-        if isinstance(data, pd.DataFrame):
-            # 记录数据结构
-            logger.info("期权链数据结构: %s", data.columns.tolist())
-            logger.info("数据示例: %s", data.head().to_dict())
-            
-            # 只选择前10个期权代码（避免超出订阅限制）
-            codes = data['code'].dropna().tolist()[:10]
-            option_codes.extend(codes)
-        
-        if not option_codes:
-            logger.error("未找到可用的期权代码")
-            return
-            
-        logger.info("选择监控以下 %d 个期权代码: %s", len(option_codes), option_codes)
-            
-        # 订阅期权行情
-        subscribe_option_quotes(quote_ctx, option_codes)
-        
-        # 设置回调处理器
-        quote_ctx.set_handler(QuoteHandler(logger))
-        quote_ctx.set_handler(OrderBookHandler(logger))
-        quote_ctx.set_handler(TickerHandler(logger))
-        
-        logger.info("开始监控期权行情...")
-        while True:
-            time.sleep(1)  # 保持主线程运行，等待回调
-            
-    except KeyboardInterrupt:
-        logger.info("停止监控")
-    finally:
-        quote_ctx.close()
+    ret, data, *_ = quote_ctx.get_option_chain(code, option_type=option_type)
+    if ret != RET_OK:
+        logger.error("获取期权链失败: %s", data)
+        return
+    option_codes = data['code'].dropna().tolist()[:10]
+    if not option_codes:
+        logger.error("未找到可用的期权代码")
+        return
+    logger.info("选择监控以下 %d 个期权代码: %s", len(option_codes), option_codes)
+    subscribe_option_quotes(quote_ctx, option_codes)
+    quote_ctx.set_handler(QuoteHandler(logger))
+    quote_ctx.set_handler(OrderBookHandler(logger))
+    quote_ctx.set_handler(TickerHandler(logger))
+    logger.info("期权行情订阅和handler设置完成")
+    # 不要while True，直接return
 
 def get_option_to_buy(quote_ctx, code):
     # 获取当前股票价格
@@ -317,7 +349,7 @@ def sell_all(trade_ctx, option_code, qty, buy_price):
     else:
         logger.error("卖出期权失败: %s", data)
 
-def trend_reversal_strategy(futu_api, stock_code):
+def trend_reversal_strategy(quote_ctx, trade_ctx, stock_code):
     """趋势反转策略"""
     try:
         logger.info("\n[流程图策略] 开始分析股票 %s", stock_code)
@@ -327,8 +359,8 @@ def trend_reversal_strategy(futu_api, stock_code):
         start_date = end_date - timedelta(days=1)
         
         # 获取1分钟和10分钟K线
-        kline_1m = futu_api.get_history_kline(stock_code, start_date, end_date, KLType.K_1M)
-        kline_10m = futu_api.get_history_kline(stock_code, start_date, end_date, KLType.K_10M)
+        kline_1m = get_history_kline(quote_ctx, stock_code, start_date, end_date, KLType.K_1M)
+        kline_10m = get_history_kline(quote_ctx, stock_code, start_date, end_date, KLType.K_1M)
         
         if kline_1m is None or kline_10m is None:
             logger.warning("[流程图策略] K线数据不足: %s", stock_code)
@@ -372,16 +404,13 @@ def trend_reversal_strategy(futu_api, stock_code):
         logger.info("使用%s数据作为当前价格: %s", '订阅' if quote_time > kline_time else 'K线', current_price)
         
         # 获取期权链
-        quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
         option_code, strike_price, qty, lot_size = get_option_to_buy(quote_ctx, stock_code)
-        quote_ctx.close()
         
         if option_code is None:
             logger.warning("[流程图策略] 获取期权链失败: %s", stock_code)
             return
             
         # 买入期权
-        trade_ctx = OpenSecTradeContext(host='127.0.0.1', port=11111)
         success, buy_price = buy_option(trade_ctx, option_code, qty)
         
         if not success:
@@ -397,78 +426,6 @@ def trend_reversal_strategy(futu_api, stock_code):
     except Exception as e:
         logger.error("[流程图策略] 分析股票 %s 时发生错误: %s", stock_code, str(e), exc_info=True)
 
-def main():
-    """主函数"""
-    logger = setup_logger()
-    logger.info("启动程序...")
-    
-    # 创建 FutuAPI 实例
-    futu_api = FutuAPI()
-    
-    try:
-        while True:
-            logger.info("\n" + "="*50)
-            logger.info("开始新一轮分析 - %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-            
-            # 获取账户资金状况
-            logger.info("\n获取账户资金状况...")
-            account_funds = futu_api.get_account_funds()
-            logger.info("\n账户资金状况:")
-            if account_funds is not None and not account_funds.empty:
-                logger.info(account_funds.to_string())
-            else:
-                logger.warning("账户资金数据为空")
-            
-            # 获取持仓信息
-            logger.info("\n获取持仓信息...")
-            positions = futu_api.get_positions()
-            logger.info("\n当前持仓:")
-            if positions is not None and not positions.empty:
-                logger.info(positions.to_string())
-            else:
-                logger.warning("当前持仓为空")
-            
-            # 分析股票
-            stock_list = ['HK.00700']  # 腾讯、阿里巴巴、美团
-            for stock_code in stock_list:
-                if stock_code == 'HK.00700':
-                    monitor_option_chain(stock_code, OptionType.CALL)
-                
-                # MACD策略
-                logger.info("\n[MACD策略] 分析股票: %s", stock_code)
-                result_macd = analyze_stock(futu_api, stock_code)
-                if result_macd is not None:
-                    logger.info("[MACD策略] 当前价格: %s", result_macd['current_price'])
-                    logger.info("[MACD策略] 趋势: %s", result_macd['trend'])
-                    logger.info("[MACD策略] MACD信号: %s", result_macd['macd_signal'])
-                    logger.info("[MACD策略] MA5: %.2f", result_macd['ma5'])
-                    logger.info("[MACD策略] MA10: %.2f", result_macd['ma10'])
-                    logger.info("[MACD策略] MA20: %.2f", result_macd['ma20'])
-                    logger.info("[MACD策略] MACD: %.2f", result_macd['macd'])
-                    logger.info("[MACD策略] Signal: %.2f", result_macd['signal'])
-                    logger.info("[MACD策略] Hist: %.2f", result_macd['hist'])
-                    
-                    if result_macd['macd_signal'] == 'BUY':
-                        logger.info("[MACD策略] 发现买入信号: %s", stock_code)
-                        # order_result = futu_api.place_order(stock_code, 0, 100, TrdSide.BUY, OrderType.MARKET)
-                        # logger.info("下单结果: %s", order_result)
-                
-                # 流程图策略
-                logger.info("\n[流程图策略] 分析股票: %s", stock_code)
-                result_trend = trend_reversal_strategy(futu_api, stock_code)
-                logger.info("[流程图策略] 结果: %s", result_trend)
-            
-            logger.info("\n等待60秒后进行下一轮分析...")
-            time.sleep(60)
-            
-    except KeyboardInterrupt:
-        logger.info("\n程序被用户中断")
-    except Exception as e:
-        logger.error("主循环发生错误: %s", str(e), exc_info=True)
-    finally:
-        logger.info("程序结束，清理资源...")
-        futu_api.close()
-
 def calculate_ma(data, period):
     """计算移动平均线"""
     return data['close'].rolling(window=period).mean()
@@ -482,7 +439,7 @@ def calculate_macd(data, fast=12, slow=26, signal=9):
     hist = macd - signal_line
     return macd, signal_line, hist
 
-def analyze_stock(futu_api, stock_code):
+def analyze_stock(quote_ctx, stock_code):
     """分析股票"""
     try:
         logger.info("\n开始分析股票 %s", stock_code)
@@ -495,7 +452,7 @@ def analyze_stock(futu_api, stock_code):
                    start_date.strftime('%Y-%m-%d'), 
                    end_date.strftime('%Y-%m-%d'))
         
-        kline_data = futu_api.get_history_kline(stock_code, start_date, end_date, KLType.K_1M)
+        kline_data = get_history_kline(quote_ctx, stock_code, start_date, end_date, KLType.K_1M)
         if kline_data is None or kline_data.empty:
             logger.error("无法获取 %s 的历史数据", stock_code)
             return None
@@ -514,7 +471,7 @@ def analyze_stock(futu_api, stock_code):
         
         # 获取实时行情
         logger.info("获取实时行情...")
-        quote_data = futu_api.get_stock_quote(stock_code)
+        quote_data = get_stock_quote(quote_ctx, stock_code)
         if quote_data is None or quote_data.empty:
             logger.error("无法获取 %s 的实时行情", stock_code)
             return None
@@ -543,12 +500,12 @@ def analyze_stock(futu_api, stock_code):
             'current_price': current_price,
             'trend': trend,
             'macd_signal': macd_signal,
-            'ma5': kline_data['ma5'].iloc[-1],
-            'ma10': kline_data['ma10'].iloc[-1],
-            'ma20': kline_data['ma20'].iloc[-1],
-            'macd': kline_data['macd'].iloc[-1],
-            'signal': kline_data['signal'].iloc[-1],
-            'hist': kline_data['hist'].iloc[-1]
+            'ma5': kline_data['ma5'].iloc[-1] if not pd.isna(kline_data['ma5'].iloc[-1]) else 0,
+            'ma10': kline_data['ma10'].iloc[-1] if not pd.isna(kline_data['ma10'].iloc[-1]) else 0,
+            'ma20': kline_data['ma20'].iloc[-1] if not pd.isna(kline_data['ma20'].iloc[-1]) else 0,
+            'macd': kline_data['macd'].iloc[-1] if not pd.isna(kline_data['macd'].iloc[-1]) else 0,
+            'signal': kline_data['signal'].iloc[-1] if not pd.isna(kline_data['signal'].iloc[-1]) else 0,
+            'hist': kline_data['hist'].iloc[-1] if not pd.isna(kline_data['hist'].iloc[-1]) else 0
         }
         
         logger.info("分析完成: %s", result)
@@ -557,6 +514,85 @@ def analyze_stock(futu_api, stock_code):
     except Exception as e:
         logger.error("分析股票 %s 时发生错误: %s", stock_code, str(e), exc_info=True)
         return None
+
+def main():
+    """主函数"""
+    logger = setup_logger()
+    logger.info("启动程序...")
+    
+    # 创建行情和交易上下文
+    quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+    trade_ctx = OpenSecTradeContext(host='127.0.0.1', port=11111)
+    
+    try:
+        while True:
+            logger.info("\n" + "="*50)
+            logger.info("开始新一轮分析 - %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            
+            # 获取账户资金状况
+            logger.info("\n获取账户资金状况...")
+            account_funds = get_account_funds(trade_ctx)
+            logger.info("\n账户资金状况:")
+            if account_funds is not None and not account_funds.empty:
+                logger.info(account_funds.to_string())
+            else:
+                logger.warning("账户资金数据为空")
+            
+            # 获取持仓信息
+            logger.info("\n获取持仓信息...")
+            positions = get_positions(trade_ctx)
+            logger.info("\n当前持仓:")
+            if positions is not None and not positions.empty:
+                logger.info(positions.to_string())
+            else:
+                logger.warning("当前持仓为空")
+            
+            # 分析股票
+            stock_list = ['HK.00700', 'HK.09988', 'HK.03690']  # 腾讯、阿里巴巴、美团
+            for stock_code in stock_list:
+                if stock_code == 'HK.00700':
+                    monitor_option_chain(quote_ctx, stock_code, OptionType.CALL)
+                
+                # MACD策略
+                logger.info("\n[MACD策略] 分析股票: %s", stock_code)
+                result_macd = analyze_stock(quote_ctx, stock_code)
+                if result_macd is not None:
+                    logger.info("[MACD策略] 当前价格: %s", result_macd.get('current_price', 'N/A'))
+                    logger.info("[MACD策略] 趋势: %s", result_macd.get('trend', 'N/A'))
+                    logger.info("[MACD策略] MACD信号: %s", result_macd.get('macd_signal', 'N/A'))
+                    logger.info("[MACD策略] MA5: %.2f", result_macd.get('ma5', 0))
+                    logger.info("[MACD策略] MA10: %.2f", result_macd.get('ma10', 0))
+                    logger.info("[MACD策略] MA20: %.2f", result_macd.get('ma20', 0))
+                    logger.info("[MACD策略] MACD: %.2f", result_macd.get('macd', 0))
+                    logger.info("[MACD策略] Signal: %.2f", result_macd.get('signal', 0))
+                    logger.info("[MACD策略] Hist: %.2f", result_macd.get('hist', 0))
+                    
+                    if result_macd.get('macd_signal') == 'BUY':
+                        logger.info("[MACD策略] 发现买入信号: %s", stock_code)
+                        # order_result = place_order(trade_ctx, stock_code, 0, 100, TrdSide.BUY, OrderType.MARKET)
+                        # logger.info("下单结果: %s", order_result)
+                else:
+                    logger.warning("[MACD策略] 分析结果为空")
+                
+                # 流程图策略
+                logger.info("\n[流程图策略] 分析股票: %s", stock_code)
+                result_trend = trend_reversal_strategy(quote_ctx, trade_ctx, stock_code)
+                if result_trend is not None:
+                    logger.info("[流程图策略] 结果: %s", result_trend)
+                else:
+                    logger.warning("[流程图策略] 分析结果为空")
+            
+            logger.info("\n等待60秒后进行下一轮分析...")
+            time.sleep(60)
+            
+    except KeyboardInterrupt:
+        logger.info("\n程序被用户中断")
+    except Exception as e:
+        logger.error("主循环发生错误: %s", str(e), exc_info=True)
+    finally:
+        logger.info("程序结束，清理资源...")
+        quote_ctx.close()
+        trade_ctx.close()
 
 if __name__ == '__main__':
     main()
